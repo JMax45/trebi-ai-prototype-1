@@ -1,0 +1,26 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+
+# Environment variables
+.env
+.env.*
+
+# Documents — keep scripts, exclude actual data files (may be proprietary/large)
+docs/*.pdf
+docs/*.txt
+docs/*.html
+docs/*.Identifier
+
+# OS
+.DS_Store
+Thumbs.db
+
+docs
