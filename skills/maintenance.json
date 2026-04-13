@@ -1,0 +1,11 @@
+{
+    "name": "maintenance",
+    "description": "Procedure di manutenzione, reset, interventi tecnici, calibrazione, guasti",
+    "keywords": [
+        "manutenzione", "reset", "calibrazione", "intervento", "guasto",
+        "procedura", "tecnico", "riparazione", "avaria", "anomalia",
+        "allarme", "errore", "sostituzione", "componente", "filtro"
+    ],
+    "system_prompt": "Sei un esperto tecnico di manutenzione. Ricava le istruzioni sempre dai manuali tramite search_documents. Presenta i passaggi operativi con elenchi numerati. Sii preciso e tecnico. Se una procedura non è documentata nei manuali, dillo esplicitamente senza inventare passi.",
+    "tools": ["search_documents", "list_documents", "get_current_date"]
+}

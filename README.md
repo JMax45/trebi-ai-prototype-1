@@ -1,27 +1,94 @@
 # RAG Project
 
-A local Retrieval-Augmented Generation (RAG) system. Ask questions in natural
-language against your own documents (PDF, TXT, HTML) and get grounded answers —
-the model only uses what's in the documents, never invents facts.
+A local Retrieval-Augmented Generation (RAG) system with an agentic layer.
+Ask questions in natural language against your own documents (PDF, TXT, HTML)
+and get grounded answers — the model only uses what's in the documents, never
+invents facts. The agent can also perform multi-step tasks, do calculations,
+and remember context across a conversation.
 
 ## How it works
+
+### 1. Ingestion
 
 ```
 Documents (PDF / TXT / HTML)
         │
         ▼
-   [1] INGEST (ingest.py)
-   Read → chunk → embed (BGE-M3) → store in Qdrant
-        │
-        ▼
-   [2] QUERY (main.py — FastAPI server)
-   Question → hybrid search (dense + sparse, RRF fusion)
-            → cross-encoder rerank → Qwen 2.5 7B → streaming answer
-        │
-        ▼
-   [3] CHAT (chat.py — CLI client)
-   Streams the answer token by token
+   [ingest.py]
+   Read → parent-child chunking → embed with BGE-M3 (dense + sparse)
+        → store in Qdrant (local vector database)
 ```
+
+Each document is split into large *parent* chunks (1500 chars, sent to the LLM)
+and small *child* chunks (400 chars, used for precise search). Both a dense
+semantic vector and a sparse lexical vector are stored per child chunk.
+
+### 2. The agentic query loop
+
+```
+User question
+      │
+      ▼
+ Skill Router — keyword match → picks a skill (e.g. "maintenance", "general")
+      │
+      ▼
+ AgentWorkflow (LlamaIndex ReActAgent)
+      │
+      ├─ think: what do I need to answer this?
+      │
+      ├─ call tool ──► search_documents
+      │                  │
+      │                  ├─ hybrid search on Qdrant (dense + sparse, RRF fusion)
+      │                  ├─ deduplicate by parent chunk
+      │                  └─ cross-encoder rerank → top 8 chunks returned
+      │
+      ├─ call tool ──► calculate / list_documents / get_current_date
+      │                  (chained if needed to answer the question)
+      │
+      ├─ observe results → think again
+      │
+      └─ generate final answer (streamed token by token)
+```
+
+The key difference from a plain RAG system is the **think–act–observe loop**.
+Instead of always running the same retrieve-then-answer pipeline, the agent
+decides *which tools to call*, *in what order*, and *whether it needs more
+information* before answering. A question like "calculate 15% of the budget
+mentioned in the maintenance doc" will make the agent call `search_documents`
+first, extract the number, then call `calculate` — without any hardcoded logic.
+
+### 3. Skills
+
+Skills are JSON files in `skills/` that control agent behaviour per domain:
+
+```
+skills/
+  general.json      — fallback for generic document questions
+  maintenance.json  — technical/maintenance queries (numbered steps, precise)
+```
+
+Each skill defines:
+- **keywords** — trigger words that route the question to this skill
+- **system_prompt** — the persona and rules the agent follows
+- **tools** — which tools are available in this context
+
+Add a new skill by dropping a `.json` file in `skills/` and restarting the server.
+
+### 4. Conversation memory
+
+Each `chat.py` session gets a UUID. The server keeps a `ChatMemoryBuffer` per
+session (sliding window of 4096 tokens). Follow-up questions like
+*"puoi spiegarlo meglio?"* work without repeating context. Type `reset` in the
+CLI to clear memory and start fresh.
+
+### 5. Available tools
+
+| Tool | What it does |
+|---|---|
+| `search_documents` | Hybrid semantic + lexical search with reranking |
+| `list_documents` | Lists all files currently indexed in Qdrant |
+| `calculate` | Evaluates math expressions, percentages, square roots |
+| `get_current_date` | Returns today's date |
 
 ---
 
@@ -138,14 +205,19 @@ Type your question and press Enter. Type `exit` to quit.
 |---|---|---|
 | `POST` | `/chat` | Single response (JSON) |
 | `POST` | `/chat/stream` | Streaming response (NDJSON) |
-| `GET` | `/debug?q=...` | Show retrieved chunks and scores |
+| `GET` | `/skills` | List loaded skills and their tools |
+| `GET` | `/debug?q=...` | Show raw retrieved chunks and reranking scores |
+| `DELETE` | `/session/{id}` | Clear a session's conversation memory |
+
+Both `/chat` and `/chat/stream` accept a `session_id` field (optional, defaults
+to `"default"`). `chat.py` generates a UUID automatically per run.
 
 Example with curl:
 
 ```bash
 curl -X POST http://localhost:8000/chat \
   -H "Content-Type: application/json" \
-  -d '{"question": "What is the maintenance schedule?"}'
+  -d '{"question": "Quali sono i passi per il reset?", "session_id": "test"}'
 ```
 
 ---
@@ -154,11 +226,15 @@ curl -X POST http://localhost:8000/chat \
 
 ```
 rag-project/
-├── main.py               # FastAPI server — retrieval + LLM
+├── main.py               # FastAPI server — agent loop, tools, skills, retrieval
 ├── ingest.py             # Document ingestion pipeline
-├── chat.py               # CLI chat client
+├── chat.py               # CLI chat client (streaming, session memory)
+├── skills/
+│   ├── general.json      # Fallback skill
+│   └── maintenance.json  # Maintenance/technical skill
 ├── docs/
 │   └── extract.py        # Utility for document extraction
+├── agent_upgrade_plan.md # Notes on future agent improvements
 ├── requirements.txt
 ├── .gitignore
 └── README.md
@@ -166,6 +242,7 @@ rag-project/
 
 **Note:** The `docs/` folder is where you place your documents.
 Data files (PDF, TXT, HTML) are excluded from git — only scripts are tracked.
+Skill definitions in `skills/` are tracked and should be committed.
 
 ---
 
