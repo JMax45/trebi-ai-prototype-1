@@ -20,7 +20,10 @@ COLLECTION         = "documents"
 HYBRID_LIMIT       = 40    # candidates per search leg (dense + sparse)
 RERANK_TOP_K       = 8     # parent chunks sent to LLM after reranking
 MEMORY_TOKEN_LIMIT = 4096  # sliding-window conversation memory per session
-
+OUTPUT_DIR         = pathlib.Path(__file__).parent / "output"
+TEMPLATES_DIR      = pathlib.Path(__file__).parent / "templates"
+OUTPUT_DIR.mkdir(exist_ok=True)
+TEMPLATES_DIR.mkdir(exist_ok=True)
 # ── Models ────────────────────────────────────────────────────────────────────
 print("Loading BGE-M3 …")
 embed_model = BGEM3FlagModel("BAAI/bge-m3", use_fp16=True)
@@ -133,11 +136,43 @@ def get_current_date() -> str:
     """Restituisce la data odierna."""
     return date.today().strftime("%d/%m/%Y")
 
+def write_file(filename: str, content: str) -> str:
+    """Scrive un file di testo nella cartella output/. Il nome file deve includere l'estensione (es. report.txt). Non usare percorsi relativi o assoluti, solo il nome del file."""
+    # Sanitize: strip any path components so output is always inside OUTPUT_DIR
+    safe_name = pathlib.Path(filename).name
+    if not safe_name or safe_name.startswith("."):
+        return "Nome file non valido."
+    allowed_extensions = {".txt", ".md"}
+    if pathlib.Path(safe_name).suffix.lower() not in allowed_extensions:
+        return f"Estensione non supportata. Usa: {', '.join(allowed_extensions)}"
+    dest = OUTPUT_DIR / safe_name
+    try:
+        dest.write_text(content, encoding="utf-8")
+        return f"File salvato: output/{safe_name} ({len(content)} caratteri)"
+    except Exception as e:
+        return f"Errore nella scrittura del file: {e}"
+
+def read_template(template_name: str) -> str:
+    """Legge un template dalla cartella templates/. Passa solo il nome del file (es. report.txt). Il template può contenere segnaposto come {{titolo}}, {{data}}, {{contenuto}} da riempire."""
+    safe_name = pathlib.Path(template_name).name
+    template_path = TEMPLATES_DIR / safe_name
+    if not template_path.exists():
+        available = [f.name for f in TEMPLATES_DIR.glob("*.txt")] + \
+                    [f.name for f in TEMPLATES_DIR.glob("*.md")]
+        hint = f"Disponibili: {', '.join(available)}" if available else "Nessun template disponibile."
+        return f"Template '{safe_name}' non trovato. {hint}"
+    try:
+        return template_path.read_text(encoding="utf-8")
+    except Exception as e:
+        return f"Errore nella lettura del template: {e}"
+
 ALL_TOOLS = {
     "search_documents": FunctionTool.from_defaults(fn=search_documents),
     "list_documents":   FunctionTool.from_defaults(fn=list_documents),
     "calculate":        FunctionTool.from_defaults(fn=calculate),
     "get_current_date": FunctionTool.from_defaults(fn=get_current_date),
+    "write_file":       FunctionTool.from_defaults(fn=write_file),
+    "read_template":    FunctionTool.from_defaults(fn=read_template),
 }
 
 # ── Skills ────────────────────────────────────────────────────────────────────
@@ -211,6 +246,15 @@ async def list_skills():
         name: {"description": data.get("description"), "tools": data.get("tools")}
         for name, data in SKILLS.items()
     }
+
+@app.get("/files")
+async def list_output_files():
+    files = sorted(OUTPUT_DIR.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)
+    return [
+        {"name": f.name, "size_bytes": f.stat().st_size,
+         "modified": f.stat().st_mtime}
+        for f in files if f.is_file()
+    ]
 
 @app.post("/chat")
 async def chat(query: Query):

@@ -23,4 +23,8 @@ docs/*.Identifier
 .DS_Store
 Thumbs.db
 
+# Generated output files — keep the folder, not the contents
+output/*
+!output/.gitkeep
+
 docs
