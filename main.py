@@ -4,13 +4,14 @@ from pydantic import BaseModel
 from FlagEmbedding import BGEM3FlagModel, FlagReranker
 from llama_index.llms.ollama import Ollama
 from llama_index.core.agent import AgentWorkflow
-from llama_index.core.agent.workflow.base_agent import AgentStream
+from llama_index.core.agent.workflow.base_agent import AgentStream, AgentOutput
 from llama_index.core.tools import FunctionTool
 from llama_index.core.memory import ChatMemoryBuffer
 from qdrant_client import QdrantClient
 from qdrant_client.models import Prefetch, FusionQuery, Fusion, SparseVector
 import json
 import pathlib
+import re as _re
 import sympy
 import traceback
 from datetime import date
@@ -136,25 +137,47 @@ def get_current_date() -> str:
     """Restituisce la data odierna."""
     return date.today().strftime("%d/%m/%Y")
 
-def write_file(filename: str, content: str) -> str:
-    """Scrive un file di testo nella cartella output/. Il nome file deve includere l'estensione (es. report.txt). Non usare percorsi relativi o assoluti, solo il nome del file."""
-    # Sanitize: strip any path components so output is always inside OUTPUT_DIR
-    safe_name = pathlib.Path(filename).name
-    if not safe_name or safe_name.startswith("."):
-        return "Nome file non valido."
-    allowed_extensions = {".txt", ".md"}
-    if pathlib.Path(safe_name).suffix.lower() not in allowed_extensions:
-        return f"Estensione non supportata. Usa: {', '.join(allowed_extensions)}"
-    dest = OUTPUT_DIR / safe_name
+# ── Report extraction ────────────────────────────────────────────────────────
+REPORT_START_MARKER = "<<<REPORT_START>>>"
+REPORT_END_MARKER   = "<<<REPORT_END>>>"
+
+def check_and_save_report(response: str) -> tuple[str, str | None]:
+    """If the response contains a <<<REPORT_START>>>/<<<REPORT_END>>> block, save it
+    to the output directory and return (display_text, filename). Otherwise return
+    (response, None) unchanged."""
+    if REPORT_START_MARKER not in response:
+        return response, None
     try:
+        s = response.index(REPORT_START_MARKER) + len(REPORT_START_MARKER)
+        e = response.index(REPORT_END_MARKER, s)
+        block = response[s:e].strip()
+
+        # First line may be FILENAME: <name>
+        first_line, _, rest = block.partition("\n")
+        if first_line.upper().startswith("FILENAME:"):
+            raw_name = first_line.split(":", 1)[1].strip()
+            safe_name = pathlib.Path(raw_name).name
+            if not safe_name or pathlib.Path(safe_name).suffix.lower() not in {".txt", ".md"}:
+                safe_name = f"report_{date.today().strftime('%Y%m%d')}.txt"
+            content = rest.strip()
+        else:
+            safe_name = f"report_{date.today().strftime('%Y%m%d')}.txt"
+            content = block
+
+        dest = OUTPUT_DIR / safe_name
         dest.write_text(content, encoding="utf-8")
-        return f"File salvato: output/{safe_name} ({len(content)} caratteri)"
-    except Exception as e:
-        return f"Errore nella scrittura del file: {e}"
+        display = content + f"\n\n[File salvato: output/{safe_name} — {len(content)} caratteri]"
+        return display, safe_name
+    except (ValueError, IndexError, OSError) as exc:
+        traceback.print_exc()
+        return response, None
 
 def read_template(template_name: str) -> str:
     """Legge un template dalla cartella templates/. Passa solo il nome del file (es. report.txt). Il template può contenere segnaposto come {{titolo}}, {{data}}, {{contenuto}} da riempire."""
     safe_name = pathlib.Path(template_name).name
+    # Auto-append .txt if no extension provided
+    if not pathlib.Path(safe_name).suffix:
+        safe_name += ".txt"
     template_path = TEMPLATES_DIR / safe_name
     if not template_path.exists():
         available = [f.name for f in TEMPLATES_DIR.glob("*.txt")] + \
@@ -162,17 +185,38 @@ def read_template(template_name: str) -> str:
         hint = f"Disponibili: {', '.join(available)}" if available else "Nessun template disponibile."
         return f"Template '{safe_name}' non trovato. {hint}"
     try:
-        return template_path.read_text(encoding="utf-8")
+        content = template_path.read_text(encoding="utf-8")
+        placeholders = list(dict.fromkeys(_re.findall(r"\{\{(\w+)\}\}", content)))
+        placeholder_list = "\n".join(f"- {p}" for p in placeholders)
+        return f"{content}\n\n---\nSEGNAPOSTO DA COMPILARE (tutti obbligatori):\n{placeholder_list}"
     except Exception as e:
         return f"Errore nella lettura del template: {e}"
 
+def read_output_file(filename: str) -> str:
+    """Legge un file esistente dalla cartella output/. Usa questo strumento per rileggere un file già salvato prima di modificarlo o aggiornarlo. Passa solo il nome del file (es. report.txt)."""
+    safe_name = pathlib.Path(filename).name
+    if not safe_name or safe_name.startswith("."):
+        return "Nome file non valido."
+    # Auto-append .txt if no extension provided
+    if not pathlib.Path(safe_name).suffix:
+        safe_name += ".txt"
+    src = OUTPUT_DIR / safe_name
+    if not src.exists():
+        available = [f.name for f in OUTPUT_DIR.iterdir() if f.is_file()]
+        hint = f"File disponibili: {', '.join(available)}" if available else "Nessun file disponibile."
+        return f"File '{safe_name}' non trovato. {hint}"
+    try:
+        return src.read_text(encoding="utf-8")
+    except Exception as e:
+        return f"Errore nella lettura del file: {e}"
+
 ALL_TOOLS = {
-    "search_documents": FunctionTool.from_defaults(fn=search_documents),
-    "list_documents":   FunctionTool.from_defaults(fn=list_documents),
-    "calculate":        FunctionTool.from_defaults(fn=calculate),
-    "get_current_date": FunctionTool.from_defaults(fn=get_current_date),
-    "write_file":       FunctionTool.from_defaults(fn=write_file),
-    "read_template":    FunctionTool.from_defaults(fn=read_template),
+    "search_documents":  FunctionTool.from_defaults(fn=search_documents),
+    "list_documents":    FunctionTool.from_defaults(fn=list_documents),
+    "calculate":         FunctionTool.from_defaults(fn=calculate),
+    "get_current_date":  FunctionTool.from_defaults(fn=get_current_date),
+    "read_template":     FunctionTool.from_defaults(fn=read_template),
+    "read_output_file":  FunctionTool.from_defaults(fn=read_output_file),
 }
 
 # ── Skills ────────────────────────────────────────────────────────────────────
@@ -182,7 +226,7 @@ def _load_skills() -> dict[str, dict]:
     skills: dict[str, dict] = {}
     if SKILLS_DIR.exists():
         for f in SKILLS_DIR.glob("*.json"):
-            data = json.loads(f.read_text(encoding="utf-8"))
+            data = json.loads(f.read_text(encoding="utf-8-sig"))
             skills[data["name"]] = data
     return skills
 
@@ -216,10 +260,9 @@ def get_skill_agent(skill_name: str) -> AgentWorkflow:
         )
     return _skill_agents[skill_name]
 
-# ── Session store (memory only) ────────────────────────────────────────────────
-# Memory is per-session; skill is re-routed per question so one session
-# can use multiple skills depending on what is asked.
+# ── Session store (memory + skill lock) ───────────────────────────────────────
 _session_memory: dict[str, ChatMemoryBuffer] = {}
+_session_skill:  dict[str, str] = {}
 
 def get_memory(session_id: str) -> ChatMemoryBuffer:
     if session_id not in _session_memory:
@@ -227,6 +270,14 @@ def get_memory(session_id: str) -> ChatMemoryBuffer:
             token_limit=MEMORY_TOKEN_LIMIT
         )
     return _session_memory[session_id]
+
+def get_session_skill(session_id: str, question: str) -> str:
+    """Route skill for this question; lock to a non-general skill once matched."""
+    routed = route_skill(question)
+    if routed != "general":
+        _session_skill[session_id] = routed
+        return routed
+    return _session_skill.get(session_id, "general")
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 @app.get("/debug")
@@ -258,29 +309,51 @@ async def list_output_files():
 
 @app.post("/chat")
 async def chat(query: Query):
-    skill_name = route_skill(query.question)
+    skill_name = get_session_skill(query.session_id, query.question)
     agent      = get_skill_agent(skill_name)
     memory     = get_memory(query.session_id)
     try:
         handler = agent.run(user_msg=query.question, memory=memory)
         result  = await handler
-        return {"answer": result.response, "session_id": query.session_id, "skill": skill_name}
+        display, saved_file = check_and_save_report(result.response)
+        resp = {"answer": display, "session_id": query.session_id, "skill": skill_name}
+        if saved_file:
+            resp["saved_file"] = f"output/{saved_file}"
+        return resp
     except Exception as e:
         traceback.print_exc()
         return {"answer": f"ERRORE: {e}"}
 
 @app.post("/chat/stream")
 async def chat_stream(query: Query):
-    skill_name = route_skill(query.question)
+    skill_name = get_session_skill(query.session_id, query.question)
     agent      = get_skill_agent(skill_name)
     memory     = get_memory(query.session_id)
 
     async def generate():
         try:
             handler = agent.run(user_msg=query.question, memory=memory)
+            step_buffer: list[str] = []
+            final_response = ""
+
             async for event in handler.stream_events():
                 if isinstance(event, AgentStream) and event.delta:
-                    yield json.dumps({"token": event.delta}) + "\n"
+                    step_buffer.append(event.delta)
+                elif isinstance(event, AgentOutput):
+                    if event.tool_calls:
+                        for tc in event.tool_calls:
+                            yield json.dumps({"tool_call": tc.tool_name, "args": tc.tool_kwargs}) + "\n"
+                    else:
+                        # Overwrite each time — only the last one is the real final answer
+                        final_response = "".join(step_buffer)
+                    step_buffer = []
+
+            display_response, saved_file = check_and_save_report(final_response)
+            for token in display_response:
+                yield json.dumps({"token": token}) + "\n"
+            if saved_file:
+                yield json.dumps({"saved": f"output/{saved_file}"}) + "\n"
+
         except Exception as e:
             traceback.print_exc()
             yield json.dumps({"error": str(e)}) + "\n"
