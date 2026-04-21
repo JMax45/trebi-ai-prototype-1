@@ -28,3 +28,4 @@ output/*
 !output/.gitkeep
 
 docs
+templates
